@@ -11,19 +11,26 @@ const char* password = "inisemuasalahrenjana";
 const char* mqtt_server = "test.mosquitto.org";
 const int mqtt_port = 1883;
 const char* mqtt_topic_pub = "janggelin/sensor-dht22";
-const char* mqtt_topic_sub = "janggelin/relay-control";
+const char* mqtt_topic_sub_limit = "janggelin/optimal-limit";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 // ========== KONFIGURASI DHT22 ==========
-#define DHTPIN 5
+#define DHTPIN 4
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
 // ========== KONFIGURASI RELAY ==========
 const int relayPins[4] = {13, 14, 27, 32};
 bool relayStates[4] = {false, false, false, false};
+
+// ========== BATAS OPTIMAL (default) ==========
+float minTemp = 20.0;
+float maxTemp = 30.0;
+float minHumid = 70.0;
+float maxHumid = 90.0;
+bool limitReceived = false;
 
 // ========== SETUP ==========
 void setup() {
@@ -32,7 +39,7 @@ void setup() {
 
   for (int i = 0; i < 4; i++) {
     pinMode(relayPins[i], OUTPUT);
-    digitalWrite(relayPins[i], HIGH); // relay OFF (aktif LOW)
+    digitalWrite(relayPins[i], HIGH);
   }
 
   setupWiFi();
@@ -50,14 +57,23 @@ void loop() {
   static unsigned long lastReadTime = 0;
   if (millis() - lastReadTime >= 5000) {
     lastReadTime = millis();
-    publishSensorData();
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+
+    if (isnan(h) || isnan(t)) {
+      Serial.println("Gagal membaca sensor DHT!");
+      return;
+    }
+
+    publishSensorData(t, h);
+    autoActuatorControl(t, h);
   }
 }
 
-// ========== KONEKSI WIFI ==========
+// ========== WIFI ==========
 void setupWiFi() {
-  Serial.print("Menghubungkan ke WiFi");
   WiFi.begin(ssid, password);
+  Serial.print("Menghubungkan ke WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -65,14 +81,14 @@ void setupWiFi() {
   Serial.println("\nWiFi terhubung. IP: " + WiFi.localIP().toString());
 }
 
-// ========== KONEKSI MQTT ==========
+// ========== MQTT ==========
 void reconnectMQTT() {
   while (!client.connected()) {
     Serial.print("Menghubungkan ke MQTT...");
     String clientId = "ESP32Client-" + String(random(0xffff), HEX);
     if (client.connect(clientId.c_str())) {
       Serial.println("Berhasil!");
-      client.subscribe(mqtt_topic_sub);
+      client.subscribe(mqtt_topic_sub_limit); 
     } else {
       Serial.print("Gagal (rc=");
       Serial.print(client.state());
@@ -83,58 +99,91 @@ void reconnectMQTT() {
 }
 
 // ========== KIRIM DATA SENSOR ==========
-void publishSensorData() {
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
+void publishSensorData(float t, float h) {
+  StaticJsonDocument<100> doc;
+  doc["suhu"] = t;
+  doc["kelembaban"] = h;
 
-  if (isnan(h) || isnan(t)) {
-    Serial.println("Gagal membaca sensor DHT!");
+  char buffer[100];
+  serializeJson(doc, buffer);
+  client.publish(mqtt_topic_pub, buffer);
+  Serial.println("Data terkirim: " + String(buffer));
+}
+
+// ========== KONTROL OTOMATIS BERDASARKAN BATAS ==========
+void autoActuatorControl(float t, float h) {
+  bool isTempOptimal = (t >= minTemp && t <= maxTemp);
+  bool isHumidOptimal = (h >= minHumid && h <= maxHumid);
+
+  // Relay 1 = pompa, Relay 2 = kipas, Relay 3 = humidifier
+  if (isTempOptimal && isHumidOptimal) {
+    setRelay(1, false);
+    setRelay(2, false);
+    // setRelay(3, false);
     return;
   }
 
-  StaticJsonDocument<128> doc;
-  doc["suhu"] = t;
-  doc["kelembapan"] = h;
+  // if (!isTempOptimal && t <= minTemp) {
+  //   setRelay(3, true);
+  // } else {
+  //   setRelay(3, false);
+  // }
 
-  String payload;
-  serializeJson(doc, payload);
+  if (!isTempOptimal && t >= maxTemp) {
+    setRelay(2, true);
+  } else if (isTempOptimal && h <= maxHumid) {
+    setRelay(2, false);
+  }
 
-  Serial.println("Publishing: " + payload);
-  if (client.publish(mqtt_topic_pub, payload.c_str(), true)) {
-    Serial.println("Publish berhasil.");
+  if (!isHumidOptimal && h >= maxHumid) {
+    setRelay(2, true);
+  }
+
+  if (!isHumidOptimal && h <= minHumid) {
+    setRelay(1, true);
   } else {
-    Serial.println("Publish gagal.");
+    setRelay(1, false);
   }
 }
 
-// ========== TERIMA PERINTAH RELAY ==========
+// ========== ATUR RELAY ==========
+void setRelay(int relayNum, bool turnOn) {
+  int index = relayNum - 1;
+  if (index < 0 || index >= 4) return;
+
+  digitalWrite(relayPins[index], turnOn ? LOW : HIGH);
+  relayStates[index] = turnOn;
+
+  Serial.println("Relay " + String(relayNum) + " -> " + (turnOn ? "ON" : "OFF"));
+}
+
+// ========== CALLBACK MQTT ==========
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Pesan diterima [");
+  Serial.print("Pesan MQTT diterima [");
   Serial.print(topic);
   Serial.print("]: ");
 
-  payload[length] = '\0'; // pastikan string diakhiri null
+  payload[length] = '\0';
   String message = String((char*)payload);
   Serial.println(message);
 
-  StaticJsonDocument<100> doc;
-  DeserializationError error = deserializeJson(doc, payload);
+  // Topik batas optimal
+  if (String(topic) == mqtt_topic_sub_limit) {
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) {
+      Serial.println("Gagal parsing batas optimal: " + String(error.c_str()));
+      return;
+    }
 
-  if (error) {
-    Serial.println("JSON Parsing Error: ");
-    Serial.println(error.c_str());
-    return;
-  }
+    minTemp = doc["minTemperature"] | minTemp;
+    maxTemp = doc["maxTemperature"] | maxTemp;
+    minHumid = doc["minHumidity"] | minHumid;
+    maxHumid = doc["maxHumidity"] | maxHumid;
+    limitReceived = true;
 
-  int relayNum = doc["relay"];
-  String state = doc["state"];
-
-  if (relayNum >= 1 && relayNum <= 4 && (state == "ON" || state == "OFF")) {
-    int index = relayNum - 1;
-    digitalWrite(relayPins[index], (state == "ON") ? LOW : HIGH);
-    relayStates[index] = (state == "ON");
-    Serial.println("Relay " + String(relayNum) + " diatur ke " + state);
-  } else {
-    Serial.println("Pesan tidak valid atau relay di luar batas");
+    Serial.println("Batas optimal diterima:");
+    Serial.printf("- Suhu: %.2f ~ %.2f\n", minTemp, maxTemp);
+    Serial.printf("- Kelembapan: %.2f ~ %.2f\n", minHumid, maxHumid);
   }
 }
