@@ -11,6 +11,7 @@ const char* password = "inisemuasalahrenjana";
 const char* mqtt_server = "test.mosquitto.org";
 const int mqtt_port = 1883;
 const char* mqtt_topic_pub = "janggelin/sensor-dht22";
+const char* mqtt_topic_pub_control = "janggelin/device-control";
 const char* mqtt_topic_sub_limit = "janggelin/optimal-limit";
 
 WiFiClient espClient;
@@ -26,7 +27,7 @@ const int relayPins[4] = {13, 14, 27, 32};
 bool relayStates[4] = {false, false, false, false};
 
 // ========== BATAS OPTIMAL (default) ==========
-float minTemp = 20.0;
+float minTemp = 26.0;
 float maxTemp = 30.0;
 float minHumid = 70.0;
 float maxHumid = 90.0;
@@ -155,6 +156,16 @@ void setRelay(int relayNum, bool turnOn) {
   relayStates[index] = turnOn;
 
   Serial.println("Relay " + String(relayNum) + " -> " + (turnOn ? "ON" : "OFF"));
+
+  // Kirim status kontrol ke MQTT
+  StaticJsonDocument<100> doc;
+  doc["id_kontrol"] = relayNum;
+  doc["status"] = turnOn ? "ON" : "OFF";
+
+  char buffer[100];
+  serializeJson(doc, buffer);
+  client.publish(mqtt_topic_pub_control, buffer);
+  Serial.println("Status kontrol dikirim: " + String(buffer));
 }
 
 // ========== CALLBACK MQTT ==========
