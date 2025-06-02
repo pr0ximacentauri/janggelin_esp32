@@ -157,7 +157,6 @@ void setRelay(int relayNum, bool turnOn) {
 
   Serial.println("Relay " + String(relayNum) + " -> " + (turnOn ? "ON" : "OFF"));
 
-  // Kirim status kontrol ke MQTT
   StaticJsonDocument<100> doc;
   doc["id_kontrol"] = relayNum;
   doc["status"] = turnOn ? "ON" : "OFF";
@@ -178,7 +177,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String message = String((char*)payload);
   Serial.println(message);
 
-  // Topik batas optimal
   if (String(topic) == mqtt_topic_sub_limit) {
     StaticJsonDocument<200> doc;
     DeserializationError error = deserializeJson(doc, payload);
