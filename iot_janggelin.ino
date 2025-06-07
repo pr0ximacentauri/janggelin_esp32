@@ -157,9 +157,22 @@ void setRelay(int relayNum, bool turnOn) {
 
   Serial.println("Relay " + String(relayNum) + " -> " + (turnOn ? "ON" : "OFF"));
 
+  int fkPerangkat = 0;
+  switch (relayNum) {
+    case 1:
+      fkPerangkat = 1; // Pompa
+      break;
+    case 2:
+      fkPerangkat = 2; // Kipas
+      break;
+    default:
+      fkPerangkat = relayNum;
+      break;
+  }
+
   StaticJsonDocument<100> doc;
-  doc["id_kontrol"] = relayNum;
   doc["status"] = turnOn ? "ON" : "OFF";
+  doc["fk_perangkat"] = fkPerangkat;
 
   char buffer[100];
   serializeJson(doc, buffer);
